@@ -17,6 +17,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
@@ -41,6 +42,13 @@ kn service apply s0 --image knativesamples/helloworld --env foo=bar
 
 # Read the service declaration from a file
 kn service apply s0 --filename my-svc.yml
+
+# Apply the service declaration in offline mode to local files instead of a
+# kubernetes cluster (experimental). The merged declaration is published
+# atomically, no Ready condition is waited for
+kn service apply s0 --image knativesamples/helloworld --target=/user/knfiles
+kn service apply s0 --image knativesamples/helloworld --target=/user/knfiles/test.yaml
+kn service apply s0 --image knativesamples/helloworld --target=/user/knfiles/test.json
 `
 
 func NewServiceApplyCommand(p *commands.KnParams) *cobra.Command {
@@ -76,7 +84,8 @@ func NewServiceApplyCommand(p *commands.KnParams) *cobra.Command {
 				return err
 			}
 
-			client, err := p.NewServingClient(namespace)
+			targetFlag := cmd.Flag("target").Value.String()
+			client, err := newServingClient(p, namespace, targetFlag)
 			if err != nil {
 				return err
 			}
@@ -90,15 +99,41 @@ func NewServiceApplyCommand(p *commands.KnParams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if !hasChanged {
-				fmt.Fprintf(cmd.OutOrStdout(), "No changes to apply to service '%s'.\n", service.Name)
 
-				return showUrl(cmd.Context(), client, service.Name, "unchanged", "", cmd.OutOrStdout())
+			out := cmd.OutOrStdout()
+
+			// GitOps path: completion is the atomic publication of the target
+			// file. There is no cluster and hence no Ready condition to wait for.
+			if targetFlag != "" {
+				if !hasChanged {
+					fmt.Fprintf(out, "No changes to apply to service '%s'.\n", service.Name)
+					return nil
+				}
+				fmt.Fprintf(out, "Service '%s' %s in namespace '%s'.\n", service.Name, waitVerb, client.Namespace())
+				return nil
 			}
-			return waitIfRequested(cmd.Context(), client, waitFlags, service.Name, waitDoing, waitVerb, "", cmd.OutOrStdout())
+
+			if !hasChanged {
+				fmt.Fprintf(out, "No changes to apply to service '%s'.\n", service.Name)
+				if !waitFlags.Wait {
+					return showUrl(cmd.Context(), client, service.Name, "unchanged", "", out)
+				}
+				// Waiting was requested, so even an unchanged declaration must
+				// satisfy the Ready condition before completion is reported.
+				// This makes a retry after a previous wait-timeout reliable:
+				// an already ready service returns immediately, a not-ready one
+				// is watched until ready or the timeout is hit.
+				wconfig := clientservingv1.WaitConfig{
+					Timeout:     time.Duration(waitFlags.TimeoutInSeconds) * time.Second,
+					ErrorWindow: time.Duration(waitFlags.ErrorWindowInSeconds) * time.Second,
+				}
+				return waitForServiceToGetReady(cmd.Context(), client, service.Name, wconfig, "", out)
+			}
+			return waitIfRequested(cmd.Context(), client, waitFlags, service.Name, waitDoing, waitVerb, "", out)
 		},
 	}
 	commands.AddNamespaceFlags(serviceApplyCommand.Flags(), false)
+	commands.AddGitOpsFlags(serviceApplyCommand.Flags())
 	applyFlags.AddCreateFlags(serviceApplyCommand)
 	waitFlags.AddConditionWaitFlags(serviceApplyCommand, commands.WaitDefaultTimeout, "apply", "service", "ready")
 	return serviceApplyCommand

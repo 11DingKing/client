@@ -305,12 +305,20 @@ func (cl *knServingClient) ApplyService(ctx context.Context, modifiedService *se
 		if err != nil {
 			return false, err
 		}
-		return true, cl.CreateService(ctx, modifiedService)
+		if err := cl.CreateService(ctx, modifiedService); err != nil {
+			return false, err
+		}
+		// Read back from the server: a create is only complete once the object
+		// can actually be retrieved. Without this boundary a (rare) lost create
+		// could be reported as success and become unrecoverable on retry.
+		if _, err := cl.GetService(ctx, modifiedService.Name); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 
 	// Merge with existing service
-	uOriginalService := getOriginalConfiguration(currentService)
-	return cl.patch(ctx, modifiedService, currentService, uOriginalService)
+	return cl.patch(ctx, modifiedService, currentService)
 }
 
 // Delete a service by name

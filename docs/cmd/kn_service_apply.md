@@ -24,6 +24,13 @@ kn service apply s0 --image knativesamples/helloworld --env foo=bar
 # Read the service declaration from a file
 kn service apply s0 --filename my-svc.yml
 
+# Apply the service declaration in offline mode to local files instead of a
+# kubernetes cluster (experimental). The merged declaration is published
+# atomically, no Ready condition is waited for
+kn service apply s0 --image knativesamples/helloworld --target=/user/knfiles
+kn service apply s0 --image knativesamples/helloworld --target=/user/knfiles/test.yaml
+kn service apply s0 --image knativesamples/helloworld --target=/user/knfiles/test.json
+
 ```
 
 ### Options
@@ -78,6 +85,7 @@ kn service apply s0 --filename my-svc.yml
       --scale-window string               Duration to look back for making auto-scaling decisions. The service is scaled to zero if no request was received in during that time. (eg: 10s)
       --security-context string           Predefined security context for the service. Accepted values: 'none' for no security context and 'strict' for dropping all capabilities, running as non-root, and no privilege escalation. (default "none")
       --service-account string            Service account name to set. An empty argument ("") clears the service account. The referenced service account must exist in the service's namespace.
+      --target string                     Work on local directory instead of a remote cluster (experimental)
       --timeout int                       Duration in seconds that the request routing layer will wait for a request delivered to a container to begin replying (default 300)
       --toleration strings                Add toleration to be set, works if the feature gate is enabled in Knative Serving feature flags configuration. Example: --tolerations Key="key1",Operator="Equal",Value="value1",Effect="NoSchedule"
       --user int                          The user ID to run the container (e.g., 1001).

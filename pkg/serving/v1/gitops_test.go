@@ -16,7 +16,9 @@ package v1
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,6 +233,118 @@ func TestGitOpsSingleFile(t *testing.T) {
 		_, err = bazclient.GetService(context.Background(), "test")
 		assert.ErrorType(t, err, apierrors.IsNotFound)
 	})
+}
+
+func TestGitOpsApply(t *testing.T) {
+	tmpDir := t.TempDir()
+	client := NewKnServingGitOpsClient("foo-ns", tmpDir)
+	ctx := context.Background()
+
+	svc := test.BuildServiceWithOptions("foo", servingtest.WithConfigSpec(buildConfiguration()))
+	t.Run("apply creates the missing declaration atomically", func(t *testing.T) {
+		changed, err := client.ApplyService(ctx, svc)
+		assert.NilError(t, err)
+		assert.Assert(t, changed, "a missing declaration is created and reported as changed")
+
+		fp := filepath.Join(tmpDir, "foo-ns", ksvcKind, "foo.yaml")
+		if _, err := os.Stat(fp); err != nil {
+			t.Fatalf("declaration file has not been published: %v", err)
+		}
+		got, err := client.GetService(ctx, "foo")
+		assert.NilError(t, err)
+		assert.Assert(t, got.Annotations[corev1.LastAppliedConfigAnnotation] != "",
+			"last-applied annotation is persisted for merge compatibility")
+
+		// No temporary file may remain next to the published file
+		entries, err := os.ReadDir(filepath.Join(tmpDir, "foo-ns", ksvcKind))
+		assert.NilError(t, err)
+		for _, entry := range entries {
+			assert.Assert(t, !strings.HasPrefix(entry.Name(), ".foo.yaml.tmp"),
+				"temporary file left behind: %s", entry.Name())
+		}
+	})
+
+	t.Run("applying the same declaration is unchanged", func(t *testing.T) {
+		svcSame := test.BuildServiceWithOptions("foo", servingtest.WithConfigSpec(buildConfiguration()))
+		changed, err := client.ApplyService(ctx, svcSame)
+		assert.NilError(t, err)
+		assert.Assert(t, !changed, "the declaration already on disk matches the target")
+	})
+
+	t.Run("applying an updated declaration merges and re-publishes", func(t *testing.T) {
+		svcUpdated := test.BuildServiceWithOptions("foo", servingtest.WithConfigSpec(buildConfiguration()),
+			servingtest.WithEnv(corev1.EnvVar{Name: "a", Value: "mouse"}))
+		changed, err := client.ApplyService(ctx, svcUpdated)
+		assert.NilError(t, err)
+		assert.Assert(t, changed, "the env addition is a real declaration change")
+
+		got, err := client.GetService(ctx, "foo")
+		assert.NilError(t, err)
+		assert.DeepEqual(t, got.Spec.Template.Spec.Containers[0].Env,
+			[]corev1.EnvVar{{Name: "a", Value: "mouse"}})
+
+		// The published file now converges, re-applying it is a no-op
+		svcUpdatedAgain := test.BuildServiceWithOptions("foo", servingtest.WithConfigSpec(buildConfiguration()),
+			servingtest.WithEnv(corev1.EnvVar{Name: "a", Value: "mouse"}))
+		changed, err = client.ApplyService(ctx, svcUpdatedAgain)
+		assert.NilError(t, err)
+		assert.Assert(t, !changed)
+	})
+
+	t.Run("apply without image against an existing file errors", func(t *testing.T) {
+		noImage := newServiceWithImage("foo", "")
+		changed, err := client.ApplyService(ctx, noImage)
+		assert.ErrorContains(t, err, "image name")
+		assert.Assert(t, !changed)
+	})
+
+	t.Run("a failed write does not publish a partial target", func(t *testing.T) {
+		// A regular file blocks creating the target directory, so staging fails
+		blocker := filepath.Join(tmpDir, "blocker")
+		assert.NilError(t, os.WriteFile(blocker, []byte("x"), 0644))
+		blockedPath := filepath.Join(blocker, "foo.yaml")
+		err := writeFile(svc, blockedPath, "yaml")
+		assert.Assert(t, err != nil)
+		_, err = os.Stat(blockedPath)
+		assert.Assert(t, err != nil, "no target file may be reachable after a failed write")
+		// The blocking file itself is still intact (the previous content survives)
+		blockerContent, err := os.ReadFile(blocker)
+		assert.NilError(t, err)
+		assert.Equal(t, "x", string(blockerContent))
+	})
+}
+
+func TestGitOpsApplySingleFileJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+	client := NewKnServingGitOpsClient("", filepath.Join(tmpDir, "foo.json"))
+
+	svc := test.BuildServiceWithOptions("foo", servingtest.WithConfigSpec(buildConfiguration()))
+	changed, err := client.ApplyService(ctx, svc)
+	assert.NilError(t, err)
+	assert.Assert(t, changed)
+
+	got, err := client.GetService(ctx, "foo")
+	assert.NilError(t, err)
+	assert.DeepEqual(t, got, svc)
+
+	// Same declaration again: no rewrite, reported unchanged
+	svcSame := test.BuildServiceWithOptions("foo", servingtest.WithConfigSpec(buildConfiguration()))
+	changed, err = client.ApplyService(ctx, svcSame)
+	assert.NilError(t, err)
+	assert.Assert(t, !changed)
+
+	// Changed declaration is published as JSON
+	svcUpdated := test.BuildServiceWithOptions("foo", servingtest.WithConfigSpec(buildConfiguration()),
+		servingtest.WithEnv(corev1.EnvVar{Name: "a", Value: "mouse"}))
+	changed, err = client.ApplyService(ctx, svcUpdated)
+	assert.NilError(t, err)
+	assert.Assert(t, changed)
+
+	content, err := os.ReadFile(filepath.Join(tmpDir, "foo.json"))
+	assert.NilError(t, err)
+	assert.Assert(t, strings.HasPrefix(strings.TrimSpace(string(content)), "{"), "target file is JSON")
+	assert.Assert(t, strings.Contains(string(content), `"mouse"`))
 }
 
 func getServiceList(services []servingv1.Service) *servingv1.ServiceList {

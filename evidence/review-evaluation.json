@@ -1,0 +1,48 @@
+{
+  "id": "knative-client-01b43857-6f4e-4856-b595-3d91a936922a",
+  "expectedSyncRevision": 4,
+  "completionStatus": "部分完成",
+  "rubricResults": [
+    {
+      "id": 1,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 2,
+      "passed": false,
+      "reason": "Kubernetes PATCH 成功后用 saved.Generation 与 saved.Status.ObservedGeneration 判断 changed，仅元数据声明变更已提交却被报告 unchanged"
+    },
+    {
+      "id": 3,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 4,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 5,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 6,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 7,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 8,
+      "passed": true,
+      "reason": ""
+    }
+  ],
+  "runResult": "1 通过\n2 未通过 Kubernetes PATCH 成功后用 saved.Generation 与 saved.Status.ObservedGeneration 判断 changed，仅元数据声明变更已提交却被报告 unchanged\n3 通过\n4 通过\n5 通过\n6 通过\n7 通过\n8 通过"
+}

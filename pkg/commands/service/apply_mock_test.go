@@ -17,6 +17,9 @@ package service
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,6 +136,83 @@ func TestServiceApplyWithGetError(t *testing.T) {
 	r.Validate()
 }
 
+func TestServiceApplyUnchangedNoWait(t *testing.T) {
+	// New mock client
+	client := knclient.NewMockKnServiceClient(t)
+
+	service := createServiceWithImage("foo", "gcr.io/foo/bar:baz")
+
+	// Recording: with --no-wait no Ready condition is checked for an unchanged service
+	r := client.Recorder()
+	r.GetService("foo", service, nil)
+	r.ApplyService(func(t *testing.T, a interface{}) {
+		svc := a.(*servingv1.Service)
+		assert.Equal(t, svc.Name, "foo")
+		setUrl(svc, "http://foo.example.com")
+	}, false, nil)
+	r.GetService("foo", getServiceWithUrl("foo", "http://foo.example.com"), nil)
+
+	// Testing:
+	output, err := executeServiceCommand(client, "apply", "foo", "--image", "gcr.io/foo/bar:baz", "--no-wait")
+	assert.NilError(t, err)
+	assert.Assert(t, util.ContainsAll(output, "No changes", "foo", "http://foo.example.com"))
+	assert.Assert(t, !strings.Contains(output, "Ready"))
+
+	// Validate that all recorded API methods have been called
+	r.Validate()
+}
+
+func TestServiceApplyGitopsDirectory(t *testing.T) {
+	targetDir := t.TempDir()
+
+	// Create
+	output, err := executeServiceCommandGitops("apply", "foo", "--image", "gcr.io/foo/bar:baz", "--target", targetDir)
+	assert.NilError(t, err)
+	assert.Assert(t, util.ContainsAll(output, "created", "foo", "default"), output)
+	// GitOps completion does not wait for a Ready condition
+	assert.Assert(t, !strings.Contains(output, "Ready"), output)
+
+	filePath := filepath.Join(targetDir, "default", "ksvc", "foo.yaml")
+	content, err := os.ReadFile(filePath)
+	assert.NilError(t, err)
+	assert.Assert(t, strings.Contains(string(content), "gcr.io/foo/bar:baz"))
+	assert.Assert(t, strings.Contains(string(content), "last-applied-configuration"))
+
+	// Applying the same declaration is unchanged
+	output, err = executeServiceCommandGitops("apply", "foo", "--image", "gcr.io/foo/bar:baz", "--target", targetDir)
+	assert.NilError(t, err)
+	assert.Assert(t, util.ContainsAll(output, "No changes", "foo"), output)
+
+	// Applying an updated declaration is applied, no Ready wait involved
+	output, err = executeServiceCommandGitops("apply", "foo", "--image", "gcr.io/foo/bar:baz", "--env", "a=mouse", "--target", targetDir)
+	assert.NilError(t, err)
+	assert.Assert(t, util.ContainsAll(output, "applied", "foo"), output)
+	assert.Assert(t, !strings.Contains(output, "Ready"), output)
+
+	content, err = os.ReadFile(filePath)
+	assert.NilError(t, err)
+	assert.Assert(t, strings.Contains(string(content), "name: a"))
+	assert.Assert(t, strings.Contains(string(content), "mouse"))
+
+	// The published declaration converges, applying it again is a no-op
+	output, err = executeServiceCommandGitops("apply", "foo", "--image", "gcr.io/foo/bar:baz", "--env", "a=mouse", "--target", targetDir)
+	assert.NilError(t, err)
+	assert.Assert(t, util.ContainsAll(output, "No changes", "foo"), output)
+}
+
+func TestServiceApplyGitopsSingleJSONFile(t *testing.T) {
+	targetFile := filepath.Join(t.TempDir(), "foo.json")
+
+	output, err := executeServiceCommandGitops("apply", "foo", "--image", "gcr.io/foo/bar:baz", "--target", targetFile)
+	assert.NilError(t, err)
+	assert.Assert(t, util.ContainsAll(output, "created", "foo"), output)
+
+	content, err := os.ReadFile(targetFile)
+	assert.NilError(t, err)
+	assert.Assert(t, strings.HasPrefix(strings.TrimSpace(string(content)), "{"), "target must be JSON")
+	assert.Assert(t, strings.Contains(string(content), "gcr.io/foo/bar:baz"))
+}
+
 func setupServiceApplyRecorder(client *knclient.MockKnServingClient, name string, service *servingv1.Service, err error, hasChanged bool) *knclient.ServingRecorder {
 	// Recording:
 	r := client.Recorder()
@@ -150,14 +230,12 @@ func setupServiceApplyRecorder(client *knclient.MockKnServingClient, name string
 		setUrl(svc, fmt.Sprintf("http://%s.example.com", name))
 	}, hasChanged, nil)
 
+	// Both changed and unchanged declarations wait for (or immediately verify)
+	// the Ready condition before completion is reported
+	r.WaitForService(name, mock.Any(), wait.NoopMessageCallback(), nil, time.Second)
+
 	// Fetch service for URL
 	r.GetService(name, getServiceWithUrl(name, fmt.Sprintf("http://%s.example.com", name)), nil)
-
-	if !hasChanged {
-		return r
-	}
-	// Wait for service to become ready
-	r.WaitForService(name, mock.Any(), wait.NoopMessageCallback(), nil, time.Second)
 
 	return r
 }

@@ -16,6 +16,7 @@ package v1
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -151,30 +152,156 @@ func (cl *knServingGitOpsClient) listServicesFromDirectory() ([]servingv1.Servic
 // CreateService saves the knative service spec in
 // yaml format in the local path provided
 func (cl *knServingGitOpsClient) CreateService(ctx context.Context, service *servingv1.Service) error {
-	updateServingGvk(service)
-	if cl.fileMode {
-		return writeFile(service, cl.dir, cl.fileFormat)
-	}
-	//check if dir exist
-	if _, err := os.Stat(cl.dir); os.IsNotExist(err) {
-		return fmt.Errorf("directory '%s' not present, please create the directory and try again", cl.dir)
-	}
-	return writeFile(service, cl.getKsvcFilePath(service.ObjectMeta.Name), cl.fileFormat)
+	return cl.writeService(service)
 }
 
-func writeFile(obj runtime.Object, fp, format string) error {
-	if _, err := os.Stat(fp); os.IsNotExist(err) {
-		os.MkdirAll(filepath.Dir(fp), 0755)
+// ApplyService applies a service declaration to the local GitOps repository
+// using the same three-way merge semantics as the cluster-backed client:
+//   - a missing target file is created with the declaration
+//   - an existing target file is merged against its last-applied annotation
+//
+// The result is first rendered and validated in a temporary file and then
+// published atomically via a rename in the same directory; a failed attempt
+// leaves the previously published (and complete) file untouched. Retries
+// always re-read the actual file content and recompute the merge patch, never
+// reusing the annotation or the rendered output of a failed round. The
+// returned bool reports whether the declaration on disk actually changed.
+func (cl *knServingGitOpsClient) ApplyService(ctx context.Context, modifiedService *servingv1.Service) (bool, error) {
+	currentService, err := cl.GetService(ctx, modifiedService.Name)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return false, err
 	}
-	w, err := os.Create(fp)
-	if err != nil {
+
+	containers := modifiedService.Spec.Template.Spec.Containers
+	if len(containers) == 0 || containers[0].Image == "" && currentService != nil {
+		return false, errors.New("'service apply' requires the image name to run provided with the --image option")
+	}
+
+	// No current file --> create a new declaration
+	if currentService == nil {
+		if err := updateLastAppliedAnnotation(modifiedService); err != nil {
+			return false, err
+		}
+		return true, cl.writeService(modifiedService)
+	}
+
+	// Merge against the actual file content
+	var changed bool
+	for attempt := 0; attempt < applyMaxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(applyRetryDelay)
+
+			// Re-read the actual file and recompute the merge from it
+			currentService, err = cl.GetService(ctx, modifiedService.Name)
+			if err != nil {
+				return false, err
+			}
+		}
+
+		patchBytes, err := createApplyPatch(modifiedService, currentService)
+		if err != nil {
+			return false, err
+		}
+		if string(patchBytes) == "{}" {
+			// File content already matches the target (no-op, or converged after a retry)
+			return changed, nil
+		}
+
+		touchesResource, err := patchTouchesResource(patchBytes)
+		if err != nil {
+			return false, err
+		}
+		mergedService, err := mergeServiceWithPatch(currentService, patchBytes)
+		if err != nil {
+			return false, err
+		}
+		if err := cl.writeService(mergedService); err != nil {
+			return false, err
+		}
+		changed = changed || touchesResource
+
+		// Read the published file back and only declare success when its content
+		// matches the target declaration.
+		rereadService, err := cl.GetService(ctx, modifiedService.Name)
+		if err != nil {
+			return false, err
+		}
+		converged, err := applyConverged(modifiedService, currentService, rereadService)
+		if err != nil {
+			return false, err
+		}
+		if converged {
+			return changed, nil
+		}
+		currentService = rereadService
+	}
+	return false, fmt.Errorf("could not apply service '%s' to '%s': the local file does not match the target declaration after %d attempts",
+		modifiedService.Name, cl.getKsvcFilePath(modifiedService.Name), applyMaxAttempts)
+}
+
+// writeService renders and atomically publishes the service to its target path.
+func (cl *knServingGitOpsClient) writeService(service *servingv1.Service) error {
+	updateServingGvk(service)
+	fp := cl.getKsvcFilePath(service.ObjectMeta.Name)
+	if !cl.fileMode {
+		//check if dir exist
+		if _, err := os.Stat(cl.dir); os.IsNotExist(err) {
+			return fmt.Errorf("directory '%s' not present, please create the directory and try again", cl.dir)
+		}
+	}
+	return writeFile(service, fp, cl.fileFormat)
+}
+
+// writeFile renders the object into a temporary file in the target directory,
+// validates that it can be parsed back as a service and only then publishes it
+// atomically with a rename. If rendering, syncing, validation or renaming fails,
+// the temporary file is removed and any previously existing file at fp stays
+// untouched, so an interrupted write can never leave a truncated target.
+func writeFile(obj runtime.Object, fp, format string) error {
+	if err := os.MkdirAll(filepath.Dir(fp), 0755); err != nil {
 		return err
 	}
 	yamlPrinter, err := genericclioptions.NewJSONYamlPrintFlags().ToPrinter(format)
 	if err != nil {
 		return err
 	}
-	return yamlPrinter.PrintObj(obj, w)
+
+	tmp, err := os.CreateTemp(filepath.Dir(fp), "."+filepath.Base(fp)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	published := false
+	defer func() {
+		if !published {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := yamlPrinter.PrintObj(obj, tmp); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// Flush to disk before the file is validated and published
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	// Validate the staged content can be parsed back as a complete service
+	if _, err := readServiceFromFile(tmpName, ""); err != nil {
+		return err
+	}
+
+	// Atomic publish within the same directory, replacing the previous file
+	if err := os.Rename(tmpName, fp); err != nil {
+		return err
+	}
+	published = true
+	return nil
 }
 
 // UpdateService updates the service in
@@ -212,6 +339,7 @@ func readServiceFromFile(fileKey, name string) (*servingv1.Service, error) {
 		}
 		return nil, err
 	}
+	defer file.Close()
 	decoder := yaml.NewYAMLOrJSONDecoder(file, 512)
 	if err := decoder.Decode(&svc); err != nil {
 		return nil, err

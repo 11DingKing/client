@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "Kubernetes 更新发生 resourceVersion 冲突时，apply 重新读取并合并目标声明，不覆盖并发服务端变更。"
+  - id: 2
+    type: f2p
+    text: "Kubernetes 路径只在服务端回读与目标一致后报告已应用，并准确区分 changed 与 unchanged。"
+  - id: 3
+    type: f2p
+    text: "请求等待 Ready 时，超时或终止会返回未完成结果，不把已提交但未就绪的 Service 报告为完成。"
+  - id: 4
+    type: f2p
+    text: "GitOps 路径先完整序列化并校验临时文件，再原子替换正式 YAML 或 JSON。"
+  - id: 5
+    type: f2p
+    text: "GitOps 序列化、写入或发布失败时，上一份正式文件保持完整且临时产物可被后续重试清理。"
+  - id: 6
+    type: f2p
+    text: "任一路径重试都会读取实际集群对象或磁盘内容重新计算，不复用失败轮次的注解、changed 或输出。"
+  - id: 7
+    type: p2p
+    text: "create、update、unchanged 和无需等待的 service apply 行为保持兼容。"
+  - id: 8
+    type: p2p
+    text: "现有 last-applied 配置、YAML/JSON 格式和正常成功输出保持兼容。"

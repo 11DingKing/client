@@ -76,3 +76,30 @@ func executeServiceCommand(client clientservingv1.KnServingClient, args ...strin
 	err := cmd.Execute()
 	return output.String(), err
 }
+
+// executeServiceCommandGitops runs a service command against a real local
+// GitOps client rooted at targetDir (the --target flag is passed by the caller
+// inside args).
+func executeServiceCommandGitops(args ...string) (string, error) {
+	knParams := &commands.KnParams{}
+	knParams.ClientConfig = blankConfig
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = args
+
+	output := new(bytes.Buffer)
+	knParams.Output = output
+	knParams.NewGitopsServingClient = func(namespace string, dir string) (clientservingv1.KnServingClient, error) {
+		return clientservingv1.NewKnServingGitOpsClient(namespace, dir), nil
+	}
+	cmd := NewServiceCommand(knParams)
+	cmd.SetArgs(args)
+	cmd.SetOutput(output)
+
+	cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		return knflags.ReconcileBoolFlags(cmd.Flags())
+	}
+	err := cmd.Execute()
+	return output.String(), err
+}
