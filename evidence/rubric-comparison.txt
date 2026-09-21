@@ -1,0 +1,11 @@
+项目：project-04 | Subscription 冲突重试中的目标引用收敛 | knative-client-520ee660-2316-4644-9779-58d80c86c47e
+Session：375387593383274:bb6aaf3c99bc9866d1fc88630ee1a16b_6ab0e1857f3e96479320f39b.6ab0e1857f3e96479320f39e.6ab0e1857f3e96479320f39c:TraeCode CN.3.3.100.no_sid.no_ppe.T(2026/9/21 15:49:25)
+验证摘要：代码调用图与定向无缓存测试已审计；完成度=完成；有效轮数=28。
+Rubric ID：1｜状态：通过｜期望行为：每次 resourceVersion 冲突重试都从最新 Subscription 重新构造更新，而不复用上一轮对象。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/subscription/update.go 及 update_test.go 无缓存测试
+Rubric ID：2｜状态：通过｜期望行为：本次明确修改的 subscriber、reply 和 dead-letter sink 在同一重试轮次重新解析并一起提交。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/subscription/update.go 及 update_test.go 无缓存测试
+Rubric ID：3｜状态：通过｜期望行为：未在命令中指定的 Subscription 字段保留冲突后最新的服务端值，不被旧快照覆盖。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/subscription/update.go 及 update_test.go 无缓存测试
+Rubric ID：4｜状态：通过｜期望行为：任一目标解析失败时不提交另外两个已解析引用，并返回可定位到对应目标的错误。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/subscription/update.go 及 update_test.go 无缓存测试
+Rubric ID：5｜状态：通过｜期望行为：冲突耗尽或权限失败不会留下半份目标组合，下一次命令可从服务端当前状态继续。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/subscription/update.go 及 update_test.go 无缓存测试
+Rubric ID：6｜状态：通过｜期望行为：命令打印成功前会确认服务端保存的三个 Destination 与本次修改意图一致。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/subscription/update.go 及 update_test.go 无缓存测试
+Rubric ID：7｜状态：通过｜期望行为：没有冲突时，Subscription create/update 及 URI、可寻址资源两类 sink 解析保持兼容。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/subscription/update.go 及 update_test.go 无缓存测试
+Rubric ID：8｜状态：通过｜期望行为：只修改一个 sink 时，其余目标和现有成功、错误输出格式保持不变。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/subscription/update.go 及 update_test.go 无缓存测试

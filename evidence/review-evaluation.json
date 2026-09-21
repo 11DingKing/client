@@ -1,0 +1,48 @@
+{
+  "id": "knative-client-520ee660-2316-4644-9779-58d80c86c47e",
+  "expectedSyncRevision": 4,
+  "completionStatus": "完成",
+  "rubricResults": [
+    {
+      "id": 1,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 2,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 3,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 4,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 5,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 6,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 7,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 8,
+      "passed": true,
+      "reason": ""
+    }
+  ],
+  "runResult": "1 通过\n2 通过\n3 通过\n4 通过\n5 通过\n6 通过\n7 通过\n8 通过"
+}
