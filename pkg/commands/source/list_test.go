@@ -15,19 +15,25 @@
 package source
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"knative.dev/client/pkg/dynamic/fake"
 
 	"gotest.tools/v3/assert"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	clientdynamic "knative.dev/client/pkg/dynamic"
 	"knative.dev/client/pkg/commands"
 	"knative.dev/client/pkg/util"
+	"knative.dev/client/pkg/util/mock"
 )
 
 const (
@@ -204,6 +210,170 @@ func newSourceUnstructuredObj(name, apiVersion, kind string) *unstructured.Unstr
 			},
 		},
 	}
+}
+
+// sourceFakeCmdWithDynamicMock runs `kn source list` against a mock dynamic
+// client and returns the captured output together with the execution error.
+func sourceFakeCmdWithDynamicMock(t *testing.T, args []string, client clientdynamic.KnDynamicClient) (string, error) {
+	t.Helper()
+	knParams := &commands.KnParams{}
+	buf := new(bytes.Buffer)
+	knParams.Output = buf
+	knParams.NewDynamicClient = func(namespace string) (clientdynamic.KnDynamicClient, error) {
+		return client, nil
+	}
+	rootCmd := commands.NewTestCommand(NewSourceCommand(knParams), knParams)
+	rootCmd.SetArgs(args)
+	err := rootCmd.Execute()
+	return buf.String(), err
+}
+
+func mockSourceListGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{Group: "client.knative.dev", Version: "v1alpha1", Kind: "SourceList"}
+}
+
+func mockSourceList(items ...*unstructured.Unstructured) *unstructured.UnstructuredList {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(mockSourceListGVK())
+	for _, item := range items {
+		list.Items = append(list.Items, *item)
+	}
+	return list
+}
+
+// TestSourceListPartialTypeError verifies the table still shows the confirmed
+// source types while independent per-type failures are a non-success result
+// naming the omitted type and reason.
+func TestSourceListPartialTypeError(t *testing.T) {
+	client := clientdynamic.NewMockKnDynamicClient(t, testNamespace)
+	recorder := client.Recorder()
+	partial := &clientdynamic.PartialListError{Types: []clientdynamic.TypeListError{{
+		Type: "PingSource",
+		GVR:  schema.GroupVersionResource{Group: "sources.knative.dev", Version: "v1", Resource: "pingsources"},
+		Err: apierrors.NewForbidden(schema.GroupResource{Group: "sources.knative.dev", Resource: "pingsources"}, "p1", fmt.Errorf("denied by test")),
+	}}}
+	recorder.ListSources(mock.Any(),
+		mockSourceList(newSourceUnstructuredObj("a1", "sources.knative.dev/v1", "ApiServerSource")),
+		partial)
+
+	output, err := sourceFakeCmdWithDynamicMock(t, []string{"source", "list", "--namespace", testNamespace}, client)
+	assert.Check(t, err != nil)
+	assert.Check(t, util.ContainsAll(err.Error(), "could not list", "PingSource", "pingsources.sources.knative.dev", "forbidden", "denied by test"))
+	assert.Check(t, util.ContainsAll(output, "NAME", "a1", "ApiServerSource"))
+	// the omitted type contributes no data row
+	assert.Check(t, !strings.Contains(output, "p1"))
+	recorder.Validate()
+}
+
+// TestSourceListPartialTypeErrorJson verifies machine-readable output keeps
+// working while the omission is still reported as non-success.
+func TestSourceListPartialTypeErrorJson(t *testing.T) {
+	client := clientdynamic.NewMockKnDynamicClient(t, testNamespace)
+	recorder := client.Recorder()
+	partial := &clientdynamic.PartialListError{Types: []clientdynamic.TypeListError{{
+		Type: "PingSource",
+		GVR:  schema.GroupVersionResource{Group: "sources.knative.dev", Version: "v1", Resource: "pingsources"},
+		Err: apierrors.NewServiceUnavailable("backend overloaded"),
+	}}}
+	recorder.ListSources(mock.Any(),
+		mockSourceList(newSourceUnstructuredObj("a1", "sources.knative.dev/v1", "ApiServerSource")),
+		partial)
+
+	output, err := sourceFakeCmdWithDynamicMock(t, []string{"source", "list", "-o", "json", "--namespace", testNamespace}, client)
+	assert.Check(t, err != nil)
+	assert.Check(t, util.ContainsAll(err.Error(), "PingSource", "backend overloaded"))
+	assert.Check(t, util.ContainsAll(output, "\"apiVersion\": \"client.knative.dev/v1alpha1\"", "\"kind\": \"SourceList\"", "\"name\": \"a1\""))
+	recorder.Validate()
+}
+
+// TestSourceListPartialTypeErrorNoConfirmedSources verifies that with no
+// confirmed sources left, the omission error is returned instead of a
+// misleading "No sources found.".
+func TestSourceListPartialTypeErrorNoConfirmedSources(t *testing.T) {
+	client := clientdynamic.NewMockKnDynamicClient(t, testNamespace)
+	recorder := client.Recorder()
+	partial := &clientdynamic.PartialListError{Types: []clientdynamic.TypeListError{{
+		Type: "PingSource",
+		GVR:  schema.GroupVersionResource{Group: "sources.knative.dev", Version: "v1", Resource: "pingsources"},
+		Err: apierrors.NewForbidden(schema.GroupResource{Group: "sources.knative.dev", Resource: "pingsources"}, "", fmt.Errorf("denied by test")),
+	}}}
+	recorder.ListSources(mock.Any(), mockSourceList(), partial)
+
+	output, err := sourceFakeCmdWithDynamicMock(t, []string{"source", "list", "--namespace", testNamespace}, client)
+	assert.Check(t, err != nil)
+	assert.Check(t, util.ContainsAll(err.Error(), "PingSource", "forbidden"))
+	assert.Check(t, !strings.Contains(output, "No sources found."))
+	recorder.Validate()
+}
+
+// TestSourceListForbiddenFallback verifies the built-in GVK fallback stays
+// successful when CRD access is forbidden and the built-in types list fine.
+func TestSourceListForbiddenFallback(t *testing.T) {
+	client := clientdynamic.NewMockKnDynamicClient(t, testNamespace)
+	recorder := client.Recorder()
+	recorder.ListSources(mock.Any(), nil,
+		apierrors.NewForbidden(schema.GroupResource{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}, "", fmt.Errorf("crd denied")))
+	recorder.ListSourcesUsingGVKs(mock.Any(), mock.Any(),
+		mockSourceList(newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource")), nil)
+
+	output, err := sourceFakeCmdWithDynamicMock(t, []string{"source", "list", "--namespace", testNamespace}, client)
+	assert.NilError(t, err)
+	assert.Check(t, util.ContainsAll(output, "NAME", "p1", "PingSource"))
+	recorder.Validate()
+}
+
+// TestSourceListForbiddenFallbackNotInstalled verifies that built-in types
+// that are not installed (GVR not served) while CRDs are unreadable do not
+// turn into a non-success result; the installed types are still printed.
+func TestSourceListForbiddenFallbackNotInstalled(t *testing.T) {
+	client := clientdynamic.NewMockKnDynamicClient(t, testNamespace)
+	recorder := client.Recorder()
+	recorder.ListSources(mock.Any(), nil,
+		apierrors.NewForbidden(schema.GroupResource{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}, "", fmt.Errorf("crd denied")))
+	partial := &clientdynamic.PartialListError{Types: []clientdynamic.TypeListError{{
+		Type: "ApiServerSource",
+		GVR:  schema.GroupVersionResource{Group: "sources.knative.dev", Version: "v1", Resource: "apiserversources"},
+		Err:  apierrors.NewNotFound(schema.GroupResource{Group: "sources.knative.dev", Resource: "apiserversources"}, ""),
+	}}}
+	recorder.ListSourcesUsingGVKs(mock.Any(), mock.Any(),
+		mockSourceList(newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource")), partial)
+
+	output, err := sourceFakeCmdWithDynamicMock(t, []string{"source", "list", "--namespace", testNamespace}, client)
+	assert.NilError(t, err)
+	assert.Check(t, util.ContainsAll(output, "p1", "PingSource"))
+	recorder.Validate()
+}
+
+// TestSourceListForbiddenFallbackRealOmission verifies that a real per-type
+// failure on the built-in fallback path keeps the confirmed types and is a
+// non-success result naming the omitted type.
+func TestSourceListForbiddenFallbackRealOmission(t *testing.T) {
+	client := clientdynamic.NewMockKnDynamicClient(t, testNamespace)
+	recorder := client.Recorder()
+	recorder.ListSources(mock.Any(), nil,
+		apierrors.NewForbidden(schema.GroupResource{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}, "", fmt.Errorf("crd denied")))
+	partial := &clientdynamic.PartialListError{Types: []clientdynamic.TypeListError{
+		{
+			Type: "ApiServerSource",
+			GVR:  schema.GroupVersionResource{Group: "sources.knative.dev", Version: "v1", Resource: "apiserversources"},
+			Err:  apierrors.NewNotFound(schema.GroupResource{Group: "sources.knative.dev", Resource: "apiserversources"}, ""),
+		},
+		{
+			Type: "SinkBinding",
+			GVR:  schema.GroupVersionResource{Group: "sources.knative.dev", Version: "v1", Resource: "sinkbindings"},
+			Err:  apierrors.NewServiceUnavailable("backend overloaded"),
+		},
+	}}
+	recorder.ListSourcesUsingGVKs(mock.Any(), mock.Any(),
+		mockSourceList(newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource")), partial)
+
+	output, err := sourceFakeCmdWithDynamicMock(t, []string{"source", "list", "--namespace", testNamespace}, client)
+	assert.Check(t, err != nil)
+	assert.Check(t, util.ContainsAll(err.Error(), "SinkBinding", "backend overloaded"))
+	// the not-installed type is not reported as an omission
+	assert.Check(t, !strings.Contains(err.Error(), "ApiServerSource"))
+	assert.Check(t, util.ContainsAll(output, "p1", "PingSource"))
+	recorder.Validate()
 }
 
 func TestSourceListAllNamespace(t *testing.T) {

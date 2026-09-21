@@ -16,17 +16,23 @@ package dynamic
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
 	"gotest.tools/v3/assert"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	fakedynamic "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	"knative.dev/eventing/pkg/apis/messaging"
@@ -374,4 +380,333 @@ func TestListChannelsUsingGVKs(t *testing.T) {
 		assert.DeepEqual(t, s.GroupVersionKind(), schema.GroupVersionKind{Group: messaging.GroupName, Version: channelListVersion, Kind: channelListKind})
 	})
 
+}
+
+// rawFakeDynamic extracts the fake dynamic client used to inject reactors.
+func rawFakeDynamic(t *testing.T, client KnDynamicClient) *fakedynamic.FakeDynamicClient {
+	t.Helper()
+	raw, ok := client.RawClient().(*fakedynamic.FakeDynamicClient)
+	if !ok {
+		t.Fatalf("raw dynamic client is %T, want *fake.FakeDynamicClient", client.RawClient())
+	}
+	return raw
+}
+
+// expiredResourceVersionError mimics the API server response for a
+// continuation token whose resourceVersion expired.
+func expiredResourceVersionError() error {
+	return &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status: metav1.StatusFailure,
+		Code:   http.StatusGone,
+		Reason: metav1.StatusReasonExpired,
+		Message: "too old resource version: 1234 (5678)",
+	}}
+}
+
+func sourceGR(plural string) schema.GroupResource {
+	return schema.GroupResource{Group: "sources.knative.dev", Resource: plural}
+}
+
+// TestListSourcesPartialTypeError verifies that an independent error of one
+// source type does not fail the whole listing: the confirmed types are
+// returned together with a PartialListError naming the omitted type.
+func TestListSourcesPartialTypeError(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceCRDObjWithSpec("apiserversources", "sources.knative.dev", "v1", "ApiServerSource"),
+		newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource"),
+		newSourceUnstructuredObj("a1", "sources.knative.dev/v1", "ApiServerSource"),
+	)
+	rawFakeDynamic(t, client).PrependReactor("list", "pingsources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(sourceGR("pingsources"), "p1", fmt.Errorf("denied by test"))
+		})
+
+	sources, err := client.ListSources(context.Background())
+	assert.Check(t, err != nil)
+	partial := AsPartialListError(err)
+	if partial == nil {
+		t.Fatalf("err = %v, want *PartialListError", err)
+	}
+	assert.Equal(t, len(partial.Types), 1)
+	assert.Equal(t, partial.Types[0].Type, "PingSource")
+	assert.Equal(t, partial.Types[0].GVR.Resource, "pingsources")
+	assert.Check(t, util.ContainsAll(partial.Types[0].Err.Error(), "forbidden", "denied by test"))
+	// the confirmed type is still returned and sorted
+	assert.Equal(t, len(sources.Items), 1)
+	assert.Equal(t, sources.Items[0].GetName(), "a1")
+}
+
+// TestListSourcesTemporaryTypeError verifies a 5xx on one type is partial.
+func TestListSourcesTemporaryTypeError(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceCRDObjWithSpec("apiserversources", "sources.knative.dev", "v1", "ApiServerSource"),
+		newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource"),
+	)
+	rawFakeDynamic(t, client).PrependReactor("list", "apiserversources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("backend overloaded")
+		})
+
+	sources, err := client.ListSources(context.Background())
+	partial := AsPartialListError(err)
+	if partial == nil {
+		t.Fatalf("err = %v, want *PartialListError", err)
+	}
+	assert.Equal(t, partial.Types[0].Type, "ApiServerSource")
+	assert.Assert(t, apierrors.IsServiceUnavailable(partial.Types[0].Err))
+	assert.Check(t, util.ContainsAll(partial.Types[0].Err.Error(), "backend overloaded"))
+	assert.Equal(t, len(sources.Items), 1)
+	assert.Equal(t, sources.Items[0].GetName(), "p1")
+}
+
+// TestListSourcesVanishedTypeRestarts verifies that a GVR disappearing
+// between discovery and per-type listing refreshes the discovery view and
+// re-runs the whole aggregation from the new view instead of dropping the
+// vanished type or failing.
+func TestListSourcesVanishedTypeRestarts(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceCRDObjWithSpec("apiserversources", "sources.knative.dev", "v1", "ApiServerSource"),
+		newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource"),
+		newSourceUnstructuredObj("a1", "sources.knative.dev/v1", "ApiServerSource"),
+	)
+	pingListCalls := 0
+	rawFakeDynamic(t, client).PrependReactor("list", "pingsources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			pingListCalls++
+			if pingListCalls == 1 {
+				// CRD got uninstalled after the CRD discovery of round 1
+				return true, nil, apierrors.NewNotFound(sourceGR("pingsources"), "")
+			}
+			// round 2 runs against the refreshed view and succeeds
+			return false, nil, nil
+		})
+
+	sources, err := client.ListSources(context.Background())
+	assert.NilError(t, err)
+	if sources == nil {
+		t.Fatal("sources = nil, want not nil")
+	}
+	assert.Equal(t, len(sources.Items), 2)
+	assert.Equal(t, pingListCalls, 2)
+	assert.Equal(t, sources.Items[0].GetName(), "a1")
+	assert.Equal(t, sources.Items[1].GetName(), "p1")
+}
+
+// TestListSourcesVanishedTypeKeepsFailing verifies the round budget: a view
+// that keeps invalidating does not loop forever and yields a clear error.
+func TestListSourcesVanishedTypeKeepsFailing(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource"),
+	)
+	rawFakeDynamic(t, client).PrependReactor("list", "pingsources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewNotFound(sourceGR("pingsources"), "")
+		})
+
+	sources, err := client.ListSources(context.Background())
+	assert.Check(t, err != nil)
+	assert.Check(t, sources == nil)
+	assert.Check(t, util.ContainsAll(err.Error(), "unable to list sources", "changing", "try again"))
+}
+
+// TestListSourcesExpiredRoundRestart verifies that an expired continuation
+// token (410) discards the whole round aggregation and restarts from a fresh
+// first page.
+func TestListSourcesExpiredRoundRestart(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceCRDObjWithSpec("apiserversources", "sources.knative.dev", "v1", "ApiServerSource"),
+		newSourceUnstructuredObj("a1", "sources.knative.dev/v1", "ApiServerSource"),
+	)
+	// pingsources is served in two pages; the second page expires in round 1
+	// and succeeds in round 2. Calls 1 and 3 are the first pages of round 1
+	// and the restarted round 2, call 2 is the expired continuation and
+	// call 4 the successful second page.
+	pingPage2 := newSourceUnstructuredObj("p2", "sources.knative.dev/v1", "PingSource")
+	listCalls := 0
+	rawFakeDynamic(t, client).PrependReactor("list", "pingsources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			listCalls++
+			switch listCalls {
+			case 1, 3:
+				page := &unstructured.UnstructuredList{}
+				page.SetContinue("page-2-token")
+				page.Items = append(page.Items, *newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource"))
+				return true, page, nil
+			case 2:
+				return true, nil, expiredResourceVersionError()
+			default:
+				page := &unstructured.UnstructuredList{}
+				page.Items = append(page.Items, *pingPage2)
+				return true, page, nil
+			}
+		})
+
+	sources, err := client.ListSources(context.Background())
+	assert.NilError(t, err)
+	if sources == nil {
+		t.Fatal("sources = nil, want not nil")
+	}
+	// round 1 aggregation (a1, p1) was discarded; the final round maps to
+	// one valid view and yields each object exactly once, sorted
+	assert.Equal(t, len(sources.Items), 3)
+	assert.Equal(t, sources.Items[0].GetName(), "a1")
+	assert.Equal(t, sources.Items[1].GetName(), "p1")
+	assert.Equal(t, sources.Items[2].GetName(), "p2")
+	assert.Equal(t, listCalls, 4)
+}
+
+// TestListSourcesExpiredRestartsSimple covers the non-paged 410 path.
+func TestListSourcesExpiredRestartsSimple(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource"),
+	)
+	listCalls := 0
+	rawFakeDynamic(t, client).PrependReactor("list", "pingsources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			listCalls++
+			if listCalls == 1 {
+				return true, nil, expiredResourceVersionError()
+			}
+			return false, nil, nil
+		})
+
+	sources, err := client.ListSources(context.Background())
+	assert.NilError(t, err)
+	assert.Equal(t, len(sources.Items), 1)
+	assert.Equal(t, sources.Items[0].GetName(), "p1")
+	assert.Equal(t, listCalls, 2)
+}
+
+// TestListSourcesDeduplicateAndSort verifies the final aggregation is
+// deduplicated (same object surfacing through overlapping GVRs) and ordered
+// stably by namespace/name/type.
+func TestListSourcesDeduplicateAndSort(t *testing.T) {
+	dupV1 := *newSourceUnstructuredObj("x1", "sources.knative.dev/v1", "PingSource")
+	dupV1.SetUID(types.UID("uid-1"))
+	dupV1alpha1 := *newSourceUnstructuredObj("x1", "sources.knative.dev/v1alpha1", "PingSource")
+	dupV1alpha1.SetUID(types.UID("uid-1"))
+	other := *newSourceUnstructuredObj("z2", "sources.knative.dev/v1", "ApiServerSource")
+	other.SetUID(types.UID("uid-2"))
+	otherNs := *newSourceUnstructuredObj("n3", "sources.knative.dev/v1", "PingSource")
+	otherNs.SetUID(types.UID("uid-3"))
+	otherNs.SetNamespace("other")
+	// objects without UID fall back to namespaced GVK coordinates
+	noUIDA := *newSourceUnstructuredObj("q4", "sources.knative.dev/v1", "PingSource")
+	noUIDB := *newSourceUnstructuredObj("q4", "sources.knative.dev/v1", "PingSource")
+	noUIDOtherVersion := *newSourceUnstructuredObj("q4", "sources.knative.dev/v1alpha1", "PingSource")
+
+	items := deduplicateAndSortSourceItems([]unstructured.Unstructured{
+		other, noUIDA, dupV1alpha1, otherNs, noUIDOtherVersion, dupV1, noUIDB,
+	})
+	assert.Equal(t, len(items), 5)
+	// same namespaced name on different GVKs are distinct objects; the exact
+	// duplicate (same GVK, no UID) is collapsed
+	assert.Equal(t, items[0].GetNamespace(), "current")
+	assert.Equal(t, items[0].GetName(), "q4")
+	assert.Equal(t, items[1].GetName(), "q4")
+	assert.Assert(t, items[0].GetAPIVersion() != items[1].GetAPIVersion())
+	assert.Equal(t, items[2].GetName(), "x1")
+	assert.Equal(t, items[3].GetName(), "z2")
+	assert.Equal(t, items[4].GetNamespace(), "other")
+	assert.Equal(t, items[4].GetName(), "n3")
+}
+
+// TestListSourcesUsingGVKsNotInstalledAndFailing verifies the built-in
+// fallback path: a not-served GVR (type not installed) is reported as a
+// not-installed omission while a temporary failure of another type is a
+// regular omission, and confirmed types still come back.
+func TestListSourcesUsingGVKsNotInstalledAndFailing(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceCRDObjWithSpec("apiserversources", "sources.knative.dev", "v1", "ApiServerSource"),
+		newSourceCRDObjWithSpec("sinkbindings", "sources.knative.dev", "v1", "SinkBinding"),
+		newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource"),
+		newSourceUnstructuredObj("s1", "sources.knative.dev/v1", "SinkBinding"),
+	)
+	raw := rawFakeDynamic(t, client)
+	raw.PrependReactor("list", "apiserversources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewNotFound(sourceGR("apiserversources"), "")
+		})
+	raw.PrependReactor("list", "sinkbindings",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("backend overloaded")
+		})
+
+	gvks := []schema.GroupVersionKind{
+		{Group: "sources.knative.dev", Version: "v1", Kind: "PingSource"},
+		{Group: "sources.knative.dev", Version: "v1", Kind: "ApiServerSource"},
+		{Group: "sources.knative.dev", Version: "v1", Kind: "SinkBinding"},
+	}
+	sources, err := client.ListSourcesUsingGVKs(context.Background(), &gvks)
+	partial := AsPartialListError(err)
+	if partial == nil {
+		t.Fatalf("err = %v, want *PartialListError", err)
+	}
+	assert.Equal(t, len(partial.Types), 2)
+	byType := map[string]TypeListError{}
+	for _, tErr := range partial.Types {
+		byType[tErr.Type] = tErr
+	}
+	notInstalled, ok := byType["ApiServerSource"]
+	assert.Assert(t, ok)
+	assert.Assert(t, IsTypeNotInstalled(notInstalled.Err))
+	temporary, ok := byType["SinkBinding"]
+	assert.Assert(t, ok)
+	assert.Assert(t, !IsTypeNotInstalled(temporary.Err))
+	assert.Assert(t, apierrors.IsServiceUnavailable(temporary.Err))
+	assert.Equal(t, len(sources.Items), 1)
+	assert.Equal(t, sources.Items[0].GetName(), "p1")
+}
+
+// TestListSourcesUsingGVKsExpiredRestarts verifies round restarts on the
+// fixed GVK view.
+func TestListSourcesUsingGVKsExpiredRestarts(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceUnstructuredObj("p1", "sources.knative.dev/v1", "PingSource"),
+	)
+	listCalls := 0
+	rawFakeDynamic(t, client).PrependReactor("list", "pingsources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			listCalls++
+			if listCalls == 1 {
+				return true, nil, expiredResourceVersionError()
+			}
+			return false, nil, nil
+		})
+
+	gvks := []schema.GroupVersionKind{{Group: "sources.knative.dev", Version: "v1", Kind: "PingSource"}}
+	sources, err := client.ListSourcesUsingGVKs(context.Background(), &gvks)
+	assert.NilError(t, err)
+	assert.Equal(t, len(sources.Items), 1)
+	assert.Equal(t, sources.Items[0].GetName(), "p1")
+	assert.Equal(t, listCalls, 2)
+}
+
+// TestPartialListErrorTypeFilter verifies per-type omissions honor the
+// requested type filters: unfiltered types are never contacted.
+func TestListSourcesPartialErrorWithFilter(t *testing.T) {
+	client := createFakeKnDynamicClient(testNamespace,
+		newSourceCRDObjWithSpec("pingsources", "sources.knative.dev", "v1", "PingSource"),
+		newSourceCRDObjWithSpec("apiserversources", "sources.knative.dev", "v1", "ApiServerSource"),
+		newSourceUnstructuredObj("a1", "sources.knative.dev/v1", "ApiServerSource"),
+	)
+	raw := rawFakeDynamic(t, client)
+	raw.PrependReactor("list", "pingsources",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			t.Error("pingsources must not be listed when filtered out")
+			return true, nil, nil
+		})
+
+	sources, err := client.ListSources(context.Background(), WithTypeFilter("ApiServerSource"))
+	assert.NilError(t, err)
+	assert.Equal(t, len(sources.Items), 1)
+	assert.Equal(t, sources.Items[0].GetName(), "a1")
 }

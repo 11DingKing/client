@@ -73,20 +73,38 @@ func NewListCommand(p *commands.KnParams) *cobra.Command {
 
 			switch {
 			case knerrors.IsForbiddenError(err):
+				// CRD access is forbidden: fall back to the built-in source
+				// GVKs, as before. A not-served GVR on this path means the
+				// corresponding built-in source type is not installed and is
+				// not reported as an omission; independent per-type errors of
+				// installed types stay non-success.
 				gvks := sources.BuiltInSourcesGVKs()
-				if sourceList, err = dynamicClient.ListSourcesUsingGVKs(cmd.Context(), &gvks, filters...); err != nil {
+				sourceList, err = dynamicClient.ListSourcesUsingGVKs(cmd.Context(), &gvks, filters...)
+				if err != nil && dynamic.AsPartialListError(err) == nil {
 					return knerrors.GetError(err)
 				}
-			case err != nil:
+				if partial := dynamic.AsPartialListError(err); partial != nil {
+					err = partialWithoutNotInstalled(partial)
+				}
+			case err != nil && dynamic.AsPartialListError(err) == nil:
 				return knerrors.GetError(err)
 			}
 
 			if sourceList == nil {
 				sourceList = &unstructured.UnstructuredList{}
 			}
-			if !listFlags.GenericPrintFlags.OutputFlagSpecified() && len(sourceList.Items) == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No sources found.\n")
-				return nil
+			// Independent per-type failures keep the confirmed source types,
+			// but are still a non-success result. With no confirmed sources
+			// left, report the omissions instead of "No sources found.".
+			partialErr := dynamic.AsPartialListError(err)
+			if len(sourceList.Items) == 0 {
+				if partialErr != nil {
+					return knerrors.GetError(err)
+				}
+				if !listFlags.GenericPrintFlags.OutputFlagSpecified() {
+					fmt.Fprintf(cmd.OutOrStdout(), "No sources found.\n")
+					return nil
+				}
 			}
 
 			if sourceList.GroupVersionKind().Empty() {
@@ -101,13 +119,23 @@ func NewListCommand(p *commands.KnParams) *cobra.Command {
 				return nil
 			}
 			if listFlags.GenericPrintFlags.OutputFlagSpecified() {
-				return printer.PrintObj(sourceList, cmd.OutOrStdout())
+				if printErr := printer.PrintObj(sourceList, cmd.OutOrStdout()); printErr != nil {
+					return printErr
+				}
+				// Surface the omitted source types as a non-success result
+				if partialErr != nil {
+					return knerrors.GetError(partialErr)
+				}
+				return nil
 			}
 			// Convert the source list to DuckSourceList only if human readable table printing requested
 			sourceDuckList := duck.ToSourceList(sourceList)
-			err = printer.PrintObj(sourceDuckList, cmd.OutOrStdout())
-			if err != nil {
-				return err
+			if printErr := printer.PrintObj(sourceDuckList, cmd.OutOrStdout()); printErr != nil {
+				return printErr
+			}
+			// Surface the omitted source types as a non-success result
+			if partialErr != nil {
+				return knerrors.GetError(partialErr)
 			}
 			return nil
 		},
@@ -116,4 +144,24 @@ func NewListCommand(p *commands.KnParams) *cobra.Command {
 	listFlags.AddFlags(listCommand)
 	filterFlags.Add(listCommand, "source type")
 	return listCommand
+}
+
+// partialWithoutNotInstalled drops omissions caused by a built-in source type
+// simply not being installed (its GVR is not served), which is expected when
+// CRDs cannot be read and the built-in GVK fallback is used. Real omissions
+// (permission or temporary errors) are kept and returned as non-success.
+func partialWithoutNotInstalled(partial *dynamic.PartialListError) error {
+	if partial == nil {
+		return nil
+	}
+	kept := make([]dynamic.TypeListError, 0, len(partial.Types))
+	for _, t := range partial.Types {
+		if !dynamic.IsTypeNotInstalled(t.Err) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return &dynamic.PartialListError{Types: kept}
 }

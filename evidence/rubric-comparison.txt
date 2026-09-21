@@ -1,0 +1,11 @@
+项目：project-06 | source list 在发现拓扑变化下的结果收敛 | knative-client-71de32b4-fc6e-4aac-8856-66f025200f9c
+Session：375387593383274:44f2ddbe7f4ffd320fbd20cac5fdd0e5_6ab0e1837f3e96479320f390.6ab0e1847f3e96479320f393.6ab0e1837f3e96479320f391:TraeCode CN.3.3.100.no_sid.no_ppe.T(2026/9/21 15:49:24)
+验证摘要：代码调用图与定向无缓存测试已审计；完成度=完成；有效轮数=57。
+Rubric ID：1｜状态：通过｜期望行为：已发现的 Source GVR 在读取前消失或 NoMatch 时，命令刷新发现并从新视图重新列举。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/source/list.go、pkg/dynamic/client.go 及无缓存定向测试
+Rubric ID：2｜状态：通过｜期望行为：任一类型的分页 resourceVersion 过期时，该轮已聚合对象被丢弃，重试结果不重复也不缺页。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/source/list.go、pkg/dynamic/client.go 及无缓存定向测试
+Rubric ID：3｜状态：通过｜期望行为：单个 Source 类型出现独立临时错误时，其余已确认类型仍可输出，并明确标出遗漏类型和原因。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/source/list.go、pkg/dynamic/client.go 及无缓存定向测试
+Rubric ID：4｜状态：通过｜期望行为：单个类型权限不足时不伪装成完整成功，命令返回非成功结果且不隐藏已确认对象。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/source/list.go、pkg/dynamic/client.go 及无缓存定向测试
+Rubric ID：5｜状态：通过｜期望行为：最终对象只对应有效发现视图，并按身份去重后维持确定排序和既有表格字段。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/source/list.go、pkg/dynamic/client.go 及无缓存定向测试
+Rubric ID：6｜状态：通过｜期望行为：刷新或重列耗尽后返回稳定诊断，不混合失败轮次的对象、GVR 或分页 token。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/source/list.go、pkg/dynamic/client.go 及无缓存定向测试
+Rubric ID：7｜状态：通过｜期望行为：无法读取 CRD 列表时，现有内置 Source 类型回退行为保持兼容。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/source/list.go、pkg/dynamic/client.go 及无缓存定向测试
+Rubric ID：8｜状态：通过｜期望行为：类型过滤、空列表、单类型查询和正常 source list 输出格式不回归。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/commands/source/list.go、pkg/dynamic/client.go 及无缓存定向测试

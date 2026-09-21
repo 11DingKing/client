@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "已发现的 Source GVR 在读取前消失或 NoMatch 时，命令刷新发现并从新视图重新列举。"
+  - id: 2
+    type: f2p
+    text: "任一类型的分页 resourceVersion 过期时，该轮已聚合对象被丢弃，重试结果不重复也不缺页。"
+  - id: 3
+    type: f2p
+    text: "单个 Source 类型出现独立临时错误时，其余已确认类型仍可输出，并明确标出遗漏类型和原因。"
+  - id: 4
+    type: f2p
+    text: "单个类型权限不足时不伪装成完整成功，命令返回非成功结果且不隐藏已确认对象。"
+  - id: 5
+    type: f2p
+    text: "最终对象只对应有效发现视图，并按身份去重后维持确定排序和既有表格字段。"
+  - id: 6
+    type: f2p
+    text: "刷新或重列耗尽后返回稳定诊断，不混合失败轮次的对象、GVR 或分页 token。"
+  - id: 7
+    type: p2p
+    text: "无法读取 CRD 列表时，现有内置 Source 类型回退行为保持兼容。"
+  - id: 8
+    type: p2p
+    text: "类型过滤、空列表、单类型查询和正常 source list 输出格式不回归。"
