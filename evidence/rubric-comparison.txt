@@ -2,7 +2,7 @@
 Session：375387593383274:6280de18ae160994c9b4ae14daf4ea4a_6ab0e1827f3e96479320f37f.6ab0e1827f3e96479320f382.6ab0e1827f3e96479320f380:TraeCode CN.3.3.100.no_sid.no_ppe.T(2026/9/21 15:49:22)
 验证摘要：代码调用图与定向无缓存测试已审计；完成度=部分完成；有效轮数=79。
 Rubric ID：1｜状态：通过｜期望行为：Kubernetes 更新发生 resourceVersion 冲突时，apply 重新读取并合并目标声明，不覆盖并发服务端变更。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/serving/v1/apply.go、gitops.go 及 apply/gitops 定向测试
-Rubric ID：2｜状态：未通过｜期望行为：Kubernetes 路径只在服务端回读与目标一致后报告已应用，并准确区分 changed 与 unchanged。｜实际观察：Kubernetes PATCH 成功后用 saved.Generation 与 saved.Status.ObservedGeneration 判断 changed，仅元数据声明变更已提交却被报告 unchanged｜直接证据：pkg/serving/v1/apply.go:89-99｜原因：Kubernetes PATCH 成功后用 saved.Generation 与 saved.Status.ObservedGeneration 判断 changed，仅元数据声明变更已提交却被报告 unchanged｜影响：用户改动已成功保存却收到 unchanged 结果｜证据位置：pkg/serving/v1/apply.go:89-99
+Rubric ID：2｜状态：未通过｜期望行为：Kubernetes 路径只在服务端回读与目标一致后报告已应用，并准确区分 changed 与 unchanged。｜实际观察：服务端补丁成功后仅用资源世代与状态已观察世代是否相等来判断变更，只改元数据的声明已提交却被报告未变化｜直接证据：pkg/serving/v1/apply.go:89-99｜原因：服务端补丁成功后仅用资源世代与状态已观察世代是否相等来判断变更，只改元数据的声明已提交却被报告未变化｜影响：用户改动已成功保存却收到未变化结果｜证据位置：pkg/serving/v1/apply.go:89-99
 Rubric ID：3｜状态：通过｜期望行为：请求等待 Ready 时，超时或终止会返回未完成结果，不把已提交但未就绪的 Service 报告为完成。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/serving/v1/apply.go、gitops.go 及 apply/gitops 定向测试
 Rubric ID：4｜状态：通过｜期望行为：GitOps 路径先完整序列化并校验临时文件，再原子替换正式 YAML 或 JSON。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/serving/v1/apply.go、gitops.go 及 apply/gitops 定向测试
 Rubric ID：5｜状态：通过｜期望行为：GitOps 序列化、写入或发布失败时，上一份正式文件保持完整且临时产物可被后续重试清理。｜实际观察：生产调用路径实现该项要求且定向验证通过｜直接证据：pkg/serving/v1/apply.go、gitops.go 及 apply/gitops 定向测试

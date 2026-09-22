@@ -11,7 +11,7 @@
     {
       "id": 2,
       "passed": false,
-      "reason": "Kubernetes PATCH 成功后用 saved.Generation 与 saved.Status.ObservedGeneration 判断 changed，仅元数据声明变更已提交却被报告 unchanged"
+      "reason": "服务端补丁成功后仅用资源世代与状态已观察世代是否相等来判断变更，只改元数据的声明已提交却被报告未变化"
     },
     {
       "id": 3,
@@ -44,5 +44,5 @@
       "reason": ""
     }
   ],
-  "runResult": "1 通过\n2 未通过 Kubernetes PATCH 成功后用 saved.Generation 与 saved.Status.ObservedGeneration 判断 changed，仅元数据声明变更已提交却被报告 unchanged\n3 通过\n4 通过\n5 通过\n6 通过\n7 通过\n8 通过"
+  "runResult": "1 通过\n2 未通过 服务端补丁成功后仅用资源世代与状态已观察世代是否相等来判断变更，只改元数据的声明已提交却被报告未变化\n3 通过\n4 通过\n5 通过\n6 通过\n7 通过\n8 通过"
 }

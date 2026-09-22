@@ -32,7 +32,7 @@ P8 -> R8：原始 Prompt 明示的场景、边界或可观察结果由该 Rubric
 
 ```text
 1 通过
-2 未通过 Kubernetes PATCH 成功后用 saved.Generation 与 saved.Status.ObservedGeneration 判断 changed，仅元数据声明变更已提交却被报告 unchanged
+2 未通过 服务端补丁成功后仅用资源世代与状态已观察世代是否相等来判断变更，只改元数据的声明已提交却被报告未变化
 3 通过
 4 通过
 5 通过
